@@ -20,20 +20,36 @@ __email__ = "b.zeimetz@conova.com"
 __status__ = "Production"
 
 #import collectd
+import glob
 import json
 import re
-import sh
+from subprocess import Popen, PIPE, CalledProcessError
 
 USE_COLLECTD = True
 PLUGIN_NAME = 'varnishstat'
 
+def varnishstat(params):
+    try:
+        p = Popen(
+                ['varnishstat'] + params,
+                stdout = PIPE,
+                stderr = PIPE
+                )
+        stdout, stderr = p.communicate()
+        ret = p.returncode
+        if ret > 0:
+            return (ret, stdout + stderr)
+        return (ret, stdout)
+    except CalledProcessError as error:
+        return(255, str(error))
+
 def log(msg, severity='info'):
-    sev = {
-            'info' : collectd.info,
-            'error' : collectd.error,
-            }
     msg = '{}:{}'.format(PLUGIN_NAME, msg)
     if USE_COLLECTD:
+        sev = {
+                'info' : collectd.info,
+                'error' : collectd.error,
+                }
         sev[severity](msg)
     else:
         print(msg)
@@ -55,18 +71,18 @@ def dispatch_value(collectd_type, value, plugin_instance, type_instance):
                 )
         print(msg)
 
-def read_callback():
-    params = ['-j', '-t 2']
-    try:
-        stat_raw = sh.varnishstat(*params)
-    except sh.ErrorReturnCode as error:
-        msg(str(error), 'error')
-        raise
+
+def read_callback_instance(plugin_instance):
+    params = ['-j', '-t 2', '-n{}'.format(plugin_instance)]
+    ret, stat_raw = varnishstat(params)
+    if ret > 0:
+        log(str(stat_raw), 'error')
+        raise Exception(stat_raw)
 
     try:
         stat = json.loads(str(stat_raw))
     except json.decoder.JSONDecodeError as error:
-        msg(str(error), 'error')
+        log(str(error), 'error')
         raise
 
     for k,v in stat.items():
@@ -79,11 +95,18 @@ def read_callback():
                 'c' : 'counter',
                 'g' : 'gauge',
                 }[v['flag']]
-        plugin_instance = re.sub(r'^([A-Z]+)\..*', r'\1', k)
-        type_instance = re.sub(r'^[A-Z]+\.(.*)', r'\1', k)
+        type_instance = k
         value = v['value']
 
         dispatch_value(collectd_type, value, plugin_instance, type_instance)
+
+def read_callback():
+    vsms = glob.glob('/var/lib/varnish/*/_.vsm*')
+    vsms = [ re.sub(r'^/var/lib/varnish/([^/]+)/_.*', r'\1', vsm) for vsm in vsms]
+    vsms = list(set(vsms))
+    for instance in vsms:
+        read_callback_instance(instance)
+
 
 if __name__ == "__main__":
     USE_COLLECTD = False
